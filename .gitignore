@@ -1,0 +1,12 @@
+# 运行时生成
+config.json
+widget.log
+_trace.txt
+
+# 系统 / 编辑器
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.tmp
+*.bak

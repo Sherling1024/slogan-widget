@@ -1,0 +1,6 @@
+# Windows 专用项目，保持原样，避免 BOM / 行尾被转换
+*.ps1 -text
+*.vbs -text
+*.json -text
+*.md text eol=lf
+*.png binary
