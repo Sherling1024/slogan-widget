@@ -6,6 +6,7 @@
 param(
     [switch]$Demo,              # 快速演示：20 秒进入休息模式
     [switch]$InstallAutostart,  # 只安装开机自启，不开窗口
+    [switch]$OpenTasks,         # 启动后直接打开「今日任务」窗口
     [switch]$Trace              # 诊断：写出 _trace.txt
 )
 
@@ -56,6 +57,7 @@ public static class WinNative {
     [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr h);
     [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr h, IntPtr dc);
     [DllImport("gdi32.dll")] public static extern int GetDeviceCaps(IntPtr dc, int idx);
+    [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 }
 '@
 }
@@ -513,8 +515,247 @@ $script:S.Alpha = 255
 $script:S.Form  = $form
 $script:S.Panel = $panel
 
+# ---------------- 每日任务 ----------------
+$script:TasksPath = Join-Path $script:Dir 'tasks.json'
+$script:AllTasks  = $null
+$script:TaskUi    = $null
+$script:TaskDlg   = $null
+
+function Load-Tasks {
+    $map = [ordered]@{}
+    if (-not (Test-Path -LiteralPath $script:TasksPath)) { return $map }
+    try {
+        $raw = Get-Content -LiteralPath $script:TasksPath -Raw -Encoding UTF8
+        if ($null -eq $raw) { return $map }
+        $raw = $raw.Trim()
+        if ($raw.Length -eq 0) { return $map }
+        $obj = $raw | ConvertFrom-Json
+        if ($null -eq $obj) { return $map }
+        foreach ($p in $obj.PSObject.Properties) {
+            $list = New-Object System.Collections.ArrayList
+            foreach ($t in @($p.Value)) {
+                $txt = ''
+                $done = $false
+                if ($null -ne $t) {
+                    if ($t.PSObject.Properties['text']) { $txt = [string]$t.text }
+                    if ($t.PSObject.Properties['done']) { $done = [bool]$t.done }
+                }
+                [void]$list.Add([pscustomobject]@{ text = $txt; done = $done })
+            }
+            $map[[string]$p.Name] = $list
+        }
+    } catch {
+        Trace-Log ('load-tasks fail ' + $_.Exception.Message)
+    }
+    return $map
+}
+
+function Save-Tasks {
+    try {
+        $json = $script:AllTasks | ConvertTo-Json -Depth 6
+        if (-not $json) { $json = '{}' }
+        Set-Content -LiteralPath $script:TasksPath -Value $json -Encoding UTF8
+    } catch {
+        Trace-Log ('save-tasks fail ' + $_.Exception.Message)
+    }
+}
+
+function Ensure-TaskList {
+    param([string]$DateKey)
+    if (-not $script:AllTasks) { $script:AllTasks = Load-Tasks }
+    if (-not $script:AllTasks.Contains($DateKey)) {
+        $script:AllTasks[$DateKey] = New-Object System.Collections.ArrayList
+    }
+}
+
+function Add-TodayTask {
+    $U = $script:TaskUi
+    if (-not $U) { return }
+    $t = [string]$U.Text.Text
+    $t = $t.Trim()
+    if ($t.Length -eq 0) { return }
+    [void]$U.Items.Add([pscustomobject]@{ text = $t; done = $false })
+    $U.Loading = $true
+    try { [void]$U.List.Items.Add($t, $false) } finally { $U.Loading = $false }
+    Save-Tasks
+    Update-TaskSummary
+    $U.Text.Clear()
+    $U.Text.Focus()
+    if ($U.List.Items.Count -gt 0) { $U.List.TopIndex = $U.List.Items.Count - 1 }
+}
+
+function Update-TaskSummary {
+    $U = $script:TaskUi
+    if (-not $U) { return }
+    $total = $U.Items.Count
+    $done = 0
+    foreach ($it in $U.Items) { if ($it.done) { $done++ } }
+    $U.Sub.Text = $U.DateKey + ' · 已完成 ' + $done + '/' + $total
+}
+
+function Show-TasksDialog {
+    $k = [double]$script:S.K
+    if ($k -lt 1) { $k = 1 }
+    $dateKey = Get-Date -Format 'yyyy-MM-dd'
+    Ensure-TaskList $dateKey
+    $items = $script:AllTasks[$dateKey]
+
+    $bg      = [System.Drawing.Color]::FromArgb(22, 23, 34)
+    $bgList  = [System.Drawing.Color]::FromArgb(242, 244, 249)
+    $fgList  = [System.Drawing.Color]::FromArgb(28, 30, 42)
+    $fg      = [System.Drawing.Color]::FromArgb(230, 232, 242)
+    $dim     = [System.Drawing.Color]::FromArgb(138, 143, 168)
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text            = '今日任务'
+    $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedSingle
+    $dlg.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    $dlg.MaximizeBox     = $false
+    $dlg.MinimizeBox     = $false
+    $dlg.ShowIcon        = $false
+    $dlg.TopMost         = $true
+    $dlg.AutoScaleMode   = [System.Windows.Forms.AutoScaleMode]::None
+    $dlg.BackColor       = $bg
+    $dlg.ForeColor       = $fg
+    $dlg.Font = New-Object System.Drawing.Font -ArgumentList $script:FontFamily, ([float](11 * $k)), ([System.Drawing.FontStyle]::Regular), ([System.Drawing.GraphicsUnit]::Pixel)
+    $dlg.ClientSize = New-Object System.Drawing.Size -ArgumentList ([int][math]::Round(524 * $k)), ([int][math]::Round(452 * $k))
+
+    $lblTitle = New-Object System.Windows.Forms.Label
+    $lblTitle.Text      = '今日任务'
+    $lblTitle.AutoSize  = $true
+    $lblTitle.ForeColor = $fg
+    $lblTitle.Font = New-Object System.Drawing.Font -ArgumentList $script:FontFamily, ([float](18 * $k)), ([System.Drawing.FontStyle]::Bold), ([System.Drawing.GraphicsUnit]::Pixel)
+    $lblTitle.Location = New-Object System.Drawing.Point -ArgumentList ([int](22 * $k)), ([int](16 * $k))
+
+    $lblSub = New-Object System.Windows.Forms.Label
+    $lblSub.Text      = ($dateKey + ' · 已完成 0/0')
+    $lblSub.AutoSize  = $true
+    $lblSub.ForeColor = $dim
+    $lblSub.Font = New-Object System.Drawing.Font -ArgumentList $script:FontFamily, ([float](11.5 * $k)), ([System.Drawing.FontStyle]::Regular), ([System.Drawing.GraphicsUnit]::Pixel)
+    $lblSub.Location = New-Object System.Drawing.Point -ArgumentList ([int](23 * $k)), ([int](48 * $k))
+
+    $list = New-Object System.Windows.Forms.CheckedListBox
+    $list.CheckOnClick  = $true
+    $list.IntegralHeight = $false
+    $list.BorderStyle   = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $list.BackColor     = $bgList
+    $list.ForeColor     = $fgList
+    $list.HorizontalScrollbar = $true
+    $list.Font = New-Object System.Drawing.Font -ArgumentList $script:FontFamily, ([float](12 * $k)), ([System.Drawing.FontStyle]::Regular), ([System.Drawing.GraphicsUnit]::Pixel)
+    $list.Location = New-Object System.Drawing.Point -ArgumentList ([int](22 * $k)), ([int](76 * $k))
+    $list.Size     = New-Object System.Drawing.Size -ArgumentList ([int](480 * $k)), ([int](278 * $k))
+
+    $txt = New-Object System.Windows.Forms.TextBox
+    $txt.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $txt.BackColor   = $bgList
+    $txt.ForeColor   = $fgList
+    $txt.Font = New-Object System.Drawing.Font -ArgumentList $script:FontFamily, ([float](12.5 * $k)), ([System.Drawing.FontStyle]::Regular), ([System.Drawing.GraphicsUnit]::Pixel)
+    $txt.Location = New-Object System.Drawing.Point -ArgumentList ([int](22 * $k)), ([int](370 * $k))
+    $txt.Size     = New-Object System.Drawing.Size -ArgumentList ([int](372 * $k)), ([int](34 * $k))
+
+    $btnAdd = New-Object System.Windows.Forms.Button
+    $btnAdd.Text      = '添加'
+    $btnAdd.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $btnAdd.BackColor = [System.Drawing.Color]::FromArgb(42, 45, 66)
+    $btnAdd.ForeColor = $fg
+    $btnAdd.Font = New-Object System.Drawing.Font -ArgumentList $script:FontFamily, ([float](12 * $k)), ([System.Drawing.FontStyle]::Regular), ([System.Drawing.GraphicsUnit]::Pixel)
+    $btnAdd.Location = New-Object System.Drawing.Point -ArgumentList ([int](404 * $k)), ([int](369 * $k))
+    $btnAdd.Size     = New-Object System.Drawing.Size -ArgumentList ([int](98 * $k)), ([int](36 * $k))
+
+    $lblHint = New-Object System.Windows.Forms.Label
+    $lblHint.Text      = '回车添加 · 选中后按 Delete 删除'
+    $lblHint.AutoSize  = $true
+    $lblHint.ForeColor = $dim
+    $lblHint.Font = New-Object System.Drawing.Font -ArgumentList $script:FontFamily, ([float](10.5 * $k)), ([System.Drawing.FontStyle]::Regular), ([System.Drawing.GraphicsUnit]::Pixel)
+    $lblHint.Location = New-Object System.Drawing.Point -ArgumentList ([int](23 * $k)), ([int](417 * $k))
+
+    $btnClose = New-Object System.Windows.Forms.Button
+    $btnClose.Text      = '完成'
+    $btnClose.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $btnClose.BackColor = [System.Drawing.Color]::FromArgb(42, 45, 66)
+    $btnClose.ForeColor = $fg
+    $btnClose.Font = New-Object System.Drawing.Font -ArgumentList $script:FontFamily, ([float](12 * $k)), ([System.Drawing.FontStyle]::Regular), ([System.Drawing.GraphicsUnit]::Pixel)
+    $btnClose.Location = New-Object System.Drawing.Point -ArgumentList ([int](404 * $k)), ([int](406 * $k))
+    $btnClose.Size     = New-Object System.Drawing.Size -ArgumentList ([int](98 * $k)), ([int](36 * $k))
+
+    [void]$dlg.Controls.Add($lblTitle)
+    [void]$dlg.Controls.Add($lblSub)
+    [void]$dlg.Controls.Add($list)
+    [void]$dlg.Controls.Add($txt)
+    [void]$dlg.Controls.Add($btnAdd)
+    [void]$dlg.Controls.Add($lblHint)
+    [void]$dlg.Controls.Add($btnClose)
+
+    $script:TaskDlg = $dlg
+    $script:TaskUi  = @{ List = $list; Text = $txt; Items = $items; Loading = $true; Sub = $lblSub; DateKey = $dateKey }
+
+    $list.BeginUpdate()
+    foreach ($it in $items) {
+        [void]$list.Items.Add([string]$it.text, [bool]$it.done)
+    }
+    $list.EndUpdate()
+    $script:TaskUi.Loading = $false
+    Update-TaskSummary
+
+    $dlg.Add_Shown({
+        try {
+            $v = 1
+            [void][WinNative]::DwmSetWindowAttribute($script:TaskDlg.Handle, 20, [ref]$v, 4)
+            [void][WinNative]::DwmSetWindowAttribute($script:TaskDlg.Handle, 19, [ref]$v, 4)
+        } catch { }
+    })
+
+    $list.Add_ItemCheck({
+        param($s, $e)
+        $U = $script:TaskUi
+        if (-not $U -or $U.Loading) { return }
+        if ($e.Index -lt 0 -or $e.Index -ge $U.Items.Count) { return }
+        $U.Items[$e.Index].done = ($e.NewValue -eq [System.Windows.Forms.CheckState]::Checked)
+        Save-Tasks
+        Update-TaskSummary
+    })
+
+    $list.Add_KeyDown({
+        param($s, $e)
+        if ($e.KeyCode -ne [System.Windows.Forms.Keys]::Delete) { return }
+        $U = $script:TaskUi
+        if (-not $U) { return }
+        $sel = @($U.List.SelectedIndices)
+        if ($sel.Count -eq 0) { return }
+        for ($i = $sel.Count - 1; $i -ge 0; $i--) {
+            $idx = [int]$sel[$i]
+            if ($idx -ge 0 -and $idx -lt $U.Items.Count) { $U.Items.RemoveAt($idx) }
+            if ($idx -ge 0 -and $idx -lt $U.List.Items.Count) { $U.List.Items.RemoveAt($idx) }
+        }
+        Save-Tasks
+        Update-TaskSummary
+        $e.Handled = $true
+    })
+
+    $btnAdd.Add_Click({ Add-TodayTask })
+
+    $txt.Add_KeyDown({
+        param($s, $e)
+        if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+            Add-TodayTask
+            $e.SuppressKeyPress = $true
+        }
+    })
+
+    $btnClose.Add_Click({ if ($script:TaskDlg) { $script:TaskDlg.Close() } })
+
+    $dlg.Add_FormClosed({
+        $script:TaskUi  = $null
+        $script:TaskDlg = $null
+    })
+
+    [void]$dlg.ShowDialog($script:S.Form)
+    $txt.Focus()
+}
+
 # ---------------- 右键菜单 ----------------
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
+$miTasks = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '今日任务…'
 $miNext  = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '下一句'
 $miPause = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '暂停轮播'
 $miFocus = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '重置专注计时'
@@ -525,6 +766,8 @@ $miTop.Checked = $script:S.TopMost
 $miAuto.Checked = Test-Path -LiteralPath (Get-AutostartPath)
 $sep = New-Object System.Windows.Forms.ToolStripSeparator
 
+[void]$menu.Items.Add($miTasks)
+[void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 [void]$menu.Items.Add($miNext)
 [void]$menu.Items.Add($miPause)
 [void]$menu.Items.Add($miFocus)
@@ -542,6 +785,10 @@ function Set-PauseText {
 
 $script:MiPause = $miPause
 Set-PauseText
+
+$miTasks.Add_Click({
+    try { Show-TasksDialog } catch { Trace-Log ('tasks-dialog fail ' + $_.Exception.Message) }
+})
 
 $miNext.Add_Click({
     if ($script:S.Resting) { return }
@@ -694,6 +941,16 @@ $form.Add_Shown({
 
 $script:ClockTimer.Start()
 $script:RotTimer.Start()
+
+if ($OpenTasks) {
+    $script:OpenTasksTimer = New-Object System.Windows.Forms.Timer
+    $script:OpenTasksTimer.Interval = 900
+    $script:OpenTasksTimer.Add_Tick({
+        $script:OpenTasksTimer.Stop()
+        try { Show-TasksDialog } catch { Trace-Log ('open-tasks fail ' + $_.Exception.Message) }
+    })
+    $script:OpenTasksTimer.Start()
+}
 
 Trace-Log 'enter-loop'
 [System.Windows.Forms.Application]::Run($form)
