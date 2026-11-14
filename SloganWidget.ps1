@@ -142,9 +142,15 @@ function Save-Config {
         $o = [ordered]@{
             x        = [int]$S.Form.Left
             y        = [int]$S.Form.Top
+            w        = [double][math]::Round($S.LW, 1)
+            h        = [double][math]::Round($S.LH, 1)
+            sizeAuto = [bool]$S.SizeAuto
+            fontPx   = [double]$S.FontPx
             topmost  = [bool]$S.TopMost
             paused   = [bool]$S.Paused
             rounds   = [int]$S.Rounds
+            quoteMode = [string]$S.QuoteMode
+            todayQuote = [string]$S.TodayQuote
             day      = (Get-Date -Format 'yyyy-MM-dd')
         }
         ($o | ConvertTo-Json) | Set-Content -LiteralPath $script:CfgPath -Encoding UTF8
@@ -234,7 +240,7 @@ function Draw-Widget {
     $k = [double]$S.K
     $W = [double]$S.WW
     $H = [double]$S.HH
-    $pad = 22.0 * $k
+    $pad = 18.0 * $k
 
     $g.SmoothingMode     = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
     $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
@@ -248,7 +254,7 @@ function Draw-Widget {
     # ---- 边框 ----
     if ($S.Hover) { $bc = [System.Drawing.Color]::FromArgb(255, 60, 64, 96) }
     else          { $bc = [System.Drawing.Color]::FromArgb(255, 42, 45, 66) }
-    $rCard = 18.0 * $k
+    $rCard = 14.0 * $k
     $bp = New-RoundPath ([float](0.5 * $k)) ([float](0.5 * $k)) ([float]($W - 1.0 * $k)) ([float]($H - 1.0 * $k)) ([float]$rCard)
     $bPen = New-Object System.Drawing.Pen -ArgumentList $bc, ([float](1.0 * $k))
     $g.DrawPath($bPen, $bp)
@@ -258,49 +264,36 @@ function Draw-Widget {
     $dim    = [System.Drawing.Color]::FromArgb(255, 138, 143, 168)
     $foot   = [System.Drawing.Color]::FromArgb(255, 92, 98, 124)
 
-    # ---- 顶部：状态点 + 计时 + 时钟 ----
-    $dotCy = 22.0 * $k
-    $dotR  = 3.4 * $k
+    $accent = $S.Accents[$S.Kind]
+
+    # ---- 左上角状态点 ----
+    $dotCx = $pad + 3.0 * $k
+    $dotCy = 15.0 * $k
+    $dotR  = 3.2 * $k
     $halo = New-Object System.Drawing.SolidBrush -ArgumentList ([System.Drawing.Color]::FromArgb(55, $accent.R, $accent.G, $accent.B))
-    $g.FillEllipse($halo, [float](($pad + 3.0 * $k) - $dotR * 2.2), [float]($dotCy - $dotR * 2.2), [float]($dotR * 4.4), [float]($dotR * 4.4))
+    $g.FillEllipse($halo, [float]($dotCx - $dotR * 2.2), [float]($dotCy - $dotR * 2.2), [float]($dotR * 4.4), [float]($dotR * 4.4))
     $halo.Dispose()
     $dotBrush = New-Object System.Drawing.SolidBrush -ArgumentList $accent
-    $g.FillEllipse($dotBrush, [float](($pad + 3.0 * $k) - $dotR), [float]($dotCy - $dotR), [float]($dotR * 2), [float]($dotR * 2))
+    $g.FillEllipse($dotBrush, [float]($dotCx - $dotR), [float]($dotCy - $dotR), [float]($dotR * 2), [float]($dotR * 2))
     $dotBrush.Dispose()
-
-    $dimBrush = New-Object System.Drawing.SolidBrush -ArgumentList $dim
-    if ($S.Resting) {
-        $label = '休息'
-        $timeStr = Format-MMSS ([int]$S.RestLeft)
-        $timeColor = [System.Drawing.Color]::FromArgb(255, 158, 206, 106)
-    } else {
-        $label = '专注'
-        $timeStr = Format-MMSS ([int]$S.FocusSeconds)
-        $timeColor = $accent
-    }
-    $headRect = New-Object System.Drawing.RectangleF -ArgumentList ([float]($pad + 13 * $k)), ([float](13 * $k)), ([float](150 * $k)), ([float](18 * $k))
-    $g.DrawString($label, $S.FHead, $dimBrush, $headRect, $S.FmtNear)
-    $labelW = $g.MeasureString($label, $S.FHead).Width
-    $g.DrawString($timeStr, $S.FHeadBold, (New-Object System.Drawing.SolidBrush -ArgumentList $timeColor), [float]($pad + 13 * $k + $labelW + 4 * $k), [float](13 * $k))
-
-    $clockRect = New-Object System.Drawing.RectangleF -ArgumentList ([float]($W - $pad - 90 * $k)), ([float](13 * $k)), ([float](90 * $k)), ([float](18 * $k))
-    $g.DrawString($S.Clock, $S.FHead, $dimBrush, $clockRect, $S.FmtFar)
-    $dimBrush.Dispose()
 
     # ---- 主标语 ----
     $tx = [float]$pad
-    $ty = [float](38 * $k)
+    $ty = [float](22.0 * $k)
     $tw = [float]($W - 2 * $pad)
-    $th = [float](92 * $k)
+    $th = [float]($H - 22.0 * $k - 20.0 * $k)
+    if ($th -lt 20.0 * $k) { $th = 20.0 * $k }
 
     $text = [string]$S.Text
     $chosen = $null
-    foreach ($sz in $S.FontSizes) {
+    $sz = [double]$S.FontPx
+    while ($sz -ge 9.0) {
         $f = Get-SloganFont $sz
-        $m = $g.MeasureString($text, $f, [int]$tw)
-        if ($m.Height -le ($th + 4 * $k) -and $m.Width -le ($tw + 4 * $k)) { $chosen = $f; break }
+        $m = $g.MeasureString($text, $f)
+        if ($m.Height -le ($th + 2 * $k) -and $m.Width -le ($tw + 2 * $k)) { $chosen = $f; break }
+        $sz = $sz - 1.5
     }
-    if (-not $chosen) { $chosen = Get-SloganFont 10.0 }
+    if (-not $chosen) { $chosen = Get-SloganFont 9.0 }
 
     if ($S.Kind -eq 'rest') { $c = [System.Drawing.Color]::FromArgb(255, 200, 232, 160) }
     else                    { $c = [System.Drawing.Color]::FromArgb(255, 236, 239, 251) }
@@ -312,17 +305,9 @@ function Draw-Widget {
     $g.DrawString($text, $chosen, $txtBrush, $txtRect, $S.FmtCenter)
     $txtBrush.Dispose()
 
-    # ---- 底部提示 ----
-    $footBrush = New-Object System.Drawing.SolidBrush -ArgumentList $foot
-    $hintRect = New-Object System.Drawing.RectangleF -ArgumentList ([float]$pad), ([float](140 * $k)), ([float](250 * $k)), ([float](16 * $k))
-    $g.DrawString('拖动移动 · 双击换一句 · 右键菜单', $S.FFoot, $footBrush, $hintRect, $S.FmtNear)
-    $roundRect = New-Object System.Drawing.RectangleF -ArgumentList ([float]($W - $pad - 110 * $k)), ([float](140 * $k)), ([float](110 * $k)), ([float](16 * $k))
-    $g.DrawString(('今日专注 {0} 轮' -f $S.Rounds), $S.FFoot, $footBrush, $roundRect, $S.FmtFar)
-    $footBrush.Dispose()
-
     # ---- 进度条 ----
-    $barY = [float]($H - 16 * $k)
-    $barH = [float](4 * $k)
+    $barY = [float]($H - 10.0 * $k)
+    $barH = [float](3.0 * $k)
     $barW = [float]($W - 2 * $pad)
     $track = New-Object System.Drawing.SolidBrush -ArgumentList ([System.Drawing.Color]::FromArgb(255, 34, 37, 54))
     Fill-RoundRect -G $g -B $track -X ([float]$pad) -Y $barY -W $barW -H $barH -R ([float]($barH / 2))
@@ -344,7 +329,66 @@ function Draw-Widget {
     }
 }
 
-# ---------------- 仅安装自启 ----------------
+# ---------------- 尺寸 ----------------
+function Get-MeasureGraphics {
+    if (-not $script:MeasureG) {
+        $script:MeasureBmp = New-Object System.Drawing.Bitmap -ArgumentList 8, 8
+        $script:MeasureG = [System.Drawing.Graphics]::FromImage($script:MeasureBmp)
+        $script:MeasureG.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+    }
+    return $script:MeasureG
+}
+
+function Apply-Size {
+    param([double]$W, [double]$H)
+    $S = $script:S
+    if (-not $S.Form) { return }
+    $k = [double]$S.K
+    if ($W -lt 190) { $W = 190 }
+    if ($W -gt 620) { $W = 620 }
+    if ($H -lt 72)  { $H = 72 }
+    if ($H -gt 260) { $H = 260 }
+    $S.LW = $W
+    $S.LH = $H
+    $S.WW = [int][math]::Round($W * $k)
+    $S.HH = [int][math]::Round($H * $k)
+    $oldRight = $S.Form.Left + $S.Form.Width
+    $keepRight = $false
+    try {
+        $wa = [System.Windows.Forms.Screen]::FromControl($S.Form).WorkingArea
+        $keepRight = ($S.Form.Left + $S.Form.Width / 2) -gt ($wa.Left + $wa.Width / 2)
+    } catch { }
+    $S.Form.Size = New-Object System.Drawing.Size -ArgumentList $S.WW, $S.HH
+    if ($keepRight) { $S.Form.Left = $oldRight - $S.WW }
+    $regionPath = New-RoundPath 0 0 ([float]$S.WW) ([float]$S.HH) ([float](14.0 * $k))
+    $S.Form.Region = New-Object System.Drawing.Region -ArgumentList $regionPath
+    $regionPath.Dispose()
+    try {
+        $wa2 = [System.Windows.Forms.Screen]::FromControl($S.Form).WorkingArea
+        if ($S.Form.Left -lt $wa2.Left) { $S.Form.Left = $wa2.Left }
+        if ($S.Form.Top -lt $wa2.Top) { $S.Form.Top = $wa2.Top }
+        if ($S.Form.Left + $S.WW -gt $wa2.Right) { $S.Form.Left = $wa2.Right - $S.WW }
+        if ($S.Form.Top + $S.HH -gt $wa2.Bottom) { $S.Form.Top = $wa2.Bottom - $S.HH }
+    } catch { }
+    $S.Panel.Invalidate()
+}
+
+function Update-AutoSize {
+    $S = $script:S
+    if (-not $S.SizeAuto) { return }
+    if (-not $S.Form) { return }
+    $text = [string]$S.Text
+    if ($text.Length -eq 0) { return }
+    $k = [double]$S.K
+    $g = Get-MeasureGraphics
+    $f = Get-SloganFont ([double]$S.FontPx)
+    $m = $g.MeasureString($text, $f)
+    $w = [math]::Ceiling($m.Width / $k) + 2 * 18 + 10
+    $h = [math]::Ceiling($m.Height / $k) + 22 + 24
+    Apply-Size -W $w -H $h
+}
+
+
 if ($InstallAutostart) {
     Set-Autostart $true
     exit 0
@@ -360,15 +404,15 @@ else { $script:FontFamily = 'Segoe UI' }
 
 $script:S = @{
     Form = $null; Panel = $null
-    K = 1.0; WW = 404; HH = 178
+    K = 1.0; WW = 260; HH = 100; LW = 260.0; LH = 100.0
     Text = ''; Kind = 'study'; Alpha = 255; FadeDir = 0
     PendingText = ''; PendingKind = 'study'
     Rotation = 0; Paused = $false; TopMost = $true; Hover = $false
     FocusSeconds = 0; FocusTarget = 2700; Resting = $false
-    RestLeft = 0; RestTotal = 90; Rounds = 0
-    Clock = (Get-Date -Format 'HH:mm')
+    RestLeft = 0; RestTotal = 270; Rounds = 0
+    SizeAuto = $true; FontPx = 19.0
     FontCache = @{}
-    FontSizes = @(23.0, 21.0, 19.0, 17.0, 15.0, 13.0)
+    QuoteMode = 'default'; TodayQuote = ''
     Accents = @{
         study = [System.Drawing.Color]::FromArgb(255, 122, 162, 247)
         work  = [System.Drawing.Color]::FromArgb(255, 187, 154, 247)
@@ -459,8 +503,8 @@ $form.Text            = '标语小部件'
 $form.BackColor       = [System.Drawing.Color]::FromArgb(15, 16, 24)
 $form.TopMost         = $true
 $form.AutoScaleMode   = [System.Windows.Forms.AutoScaleMode]::None
-$script:S.WW = [int][math]::Round(404 * $k)
-$script:S.HH = [int][math]::Round(178 * $k)
+$script:S.WW = [int][math]::Round($script:S.LW * $k)
+$script:S.HH = [int][math]::Round($script:S.LH * $k)
 $form.Size            = New-Object System.Drawing.Size -ArgumentList $script:S.WW, $script:S.HH
 
 $panel = New-Object WidgetPanel
@@ -468,8 +512,10 @@ $panel.Dock = [System.Windows.Forms.DockStyle]::Fill
 $form.Controls.Add($panel)
 
 # 圆角
-$regionPath = New-RoundPath 0 0 ([float]$script:S.WW) ([float]$script:S.HH) ([float](18 * $k))
+$regionPath = New-RoundPath 0 0 ([float]$script:S.WW) ([float]$script:S.HH) ([float](14 * $k))
 $form.Region = New-Object System.Drawing.Region -ArgumentList $regionPath
+$script:S.Form  = $form
+$script:S.Panel = $panel
 $regionPath.Dispose()
 
 Trace-Log 'form-created'
@@ -483,6 +529,13 @@ if ($cfg) {
     $script:S.TopMost = [bool]$cfg.topmost
     $script:S.Paused  = [bool]$cfg.paused
     $script:S.Rounds  = [int]$cfg.rounds
+    if ($cfg.PSObject.Properties['sizeAuto'])  { $script:S.SizeAuto  = [bool]$cfg.sizeAuto }
+    if ($cfg.PSObject.Properties['fontPx'])    { $script:S.FontPx    = [double]$cfg.fontPx }
+    if ($cfg.PSObject.Properties['w'])         { $script:S.LW        = [double]$cfg.w }
+    if ($cfg.PSObject.Properties['h'])         { $script:S.LH        = [double]$cfg.h }
+    if ($cfg.PSObject.Properties['quoteMode']) { $script:S.QuoteMode = [string]$cfg.quoteMode }
+    if ($cfg.PSObject.Properties['todayQuote']) { $script:S.TodayQuote = [string]$cfg.todayQuote }
+    Apply-Size -W $script:S.LW -H $script:S.LH
     if ($cfg.day -ne (Get-Date -Format 'yyyy-MM-dd')) { $script:S.Rounds = 0 }
     $form.Left = [int]$cfg.x
     $form.Top  = [int]$cfg.y
@@ -514,6 +567,7 @@ $script:S.Alpha = 255
 
 $script:S.Form  = $form
 $script:S.Panel = $panel
+Update-AutoSize
 
 # ---------------- 每日任务 ----------------
 $script:TasksPath = Join-Path $script:Dir 'tasks.json'
@@ -758,24 +812,41 @@ $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $miTasks = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '今日任务…'
 $miNext  = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '下一句'
 $miPause = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '暂停轮播'
-$miFocus = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '重置专注计时'
+$miSize  = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '大小'
+$miSizeAuto = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '自适应文字'
+$miSizeS = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '小　240×88'
+$miSizeM = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '中　300×104'
+$miSizeL = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '大　380×126'
+$miSizeF = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '字号 +'
+$miSizeG = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '字号 −'
 $miTop   = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '始终置顶'
 $miAuto  = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '开机自启'
 $miExit  = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '退出'
 $miTop.Checked = $script:S.TopMost
 $miAuto.Checked = Test-Path -LiteralPath (Get-AutostartPath)
+$miSizeAuto.Checked = $script:S.SizeAuto
 $sep = New-Object System.Windows.Forms.ToolStripSeparator
+
+[void]$miSize.DropDownItems.Add($miSizeAuto)
+[void]$miSize.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+[void]$miSize.DropDownItems.Add($miSizeS)
+[void]$miSize.DropDownItems.Add($miSizeM)
+[void]$miSize.DropDownItems.Add($miSizeL)
+[void]$miSize.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+[void]$miSize.DropDownItems.Add($miSizeF)
+[void]$miSize.DropDownItems.Add($miSizeG)
 
 [void]$menu.Items.Add($miTasks)
 [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 [void]$menu.Items.Add($miNext)
 [void]$menu.Items.Add($miPause)
-[void]$menu.Items.Add($miFocus)
+[void]$menu.Items.Add($miSize)
 [void]$menu.Items.Add($sep)
 [void]$menu.Items.Add($miTop)
 [void]$menu.Items.Add($miAuto)
 [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 [void]$menu.Items.Add($miExit)
+
 
 $panel.ContextMenuStrip = $menu
 
@@ -802,12 +873,48 @@ $miPause.Add_Click({
     Set-PauseText
 })
 
-$miFocus.Add_Click({
-    $script:S.Resting = $false
-    $script:S.FocusSeconds = 0
-    $script:S.Paused = $false
-    Set-PauseText
-    Show-NextQuote
+$miSizeAuto.Add_Click({
+    $script:S.SizeAuto = $true
+    $miSizeAuto.Checked = $true
+    Update-AutoSize
+    Save-Config
+})
+
+$miSizeS.Add_Click({
+    $script:S.SizeAuto = $false
+    $miSizeAuto.Checked = $false
+    Apply-Size -W 240 -H 88
+    Save-Config
+})
+
+$miSizeM.Add_Click({
+    $script:S.SizeAuto = $false
+    $miSizeAuto.Checked = $false
+    Apply-Size -W 300 -H 104
+    Save-Config
+})
+
+$miSizeL.Add_Click({
+    $script:S.SizeAuto = $false
+    $miSizeAuto.Checked = $false
+    Apply-Size -W 380 -H 126
+    Save-Config
+})
+
+$miSizeF.Add_Click({
+    $script:S.FontPx = [math]::Min(30.0, [double]$script:S.FontPx + 1.0)
+    $script:S.SizeAuto = $true
+    $miSizeAuto.Checked = $true
+    Update-AutoSize
+    Save-Config
+})
+
+$miSizeG.Add_Click({
+    $script:S.FontPx = [math]::Max(11.0, [double]$script:S.FontPx - 1.0)
+    $script:S.SizeAuto = $true
+    $miSizeAuto.Checked = $true
+    Update-AutoSize
+    Save-Config
 })
 
 $miTop.Add_Click({
@@ -885,7 +992,6 @@ $script:ClockTimer = New-Object System.Windows.Forms.Timer
 $script:ClockTimer.Interval = 1000
 $script:ClockTimer.Add_Tick({
     $S = $script:S
-    $S.Clock = (Get-Date -Format 'HH:mm')
     if ($S.Resting) {
         $S.RestLeft = $S.RestLeft - 1
         if ($S.RestLeft -le 0) { End-Rest }
@@ -911,6 +1017,7 @@ $script:FadeTimer.Add_Tick({
     if ($S.FadeDir -lt 0 -and $S.Alpha -le 0) {
         $S.Alpha = 0
         if ($S.PendingText) { $S.Text = $S.PendingText }
+        Update-AutoSize
         $S.Kind = $S.PendingKind
         $S.FadeDir = 1
     } elseif ($S.FadeDir -gt 0 -and $S.Alpha -ge 255) {
