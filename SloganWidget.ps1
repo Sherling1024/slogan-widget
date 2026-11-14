@@ -151,6 +151,7 @@ function Save-Config {
             rounds   = [int]$S.Rounds
             quoteMode = [string]$S.QuoteMode
             todayQuote = [string]$S.TodayQuote
+            todayQuoteDay = [string]$S.QuoteDay
             day      = (Get-Date -Format 'yyyy-MM-dd')
         }
         ($o | ConvertTo-Json) | Set-Content -LiteralPath $script:CfgPath -Encoding UTF8
@@ -169,8 +170,73 @@ function Get-SloganFont {
     return $script:S.FontCache[$key]
 }
 
+function Convert-QuoteLines {
+    param([string]$Text)
+    $t = ([string]$Text).Trim()
+    if ($t.Length -le 12) { return $t }
+    $nl = [Environment]::NewLine
+    $mid = [int]($t.Length / 2)
+    $best = -1
+    $bestD = 999
+    foreach ($ch in @('，', '。', '；', ',')) {
+        $idx = $t.IndexOf($ch)
+        while ($idx -ge 4 -and $idx -le ($t.Length - 5)) {
+            $d = [Math]::Abs($idx - $mid)
+            if ($d -lt $bestD) { $bestD = $d; $best = $idx }
+            $idx = $t.IndexOf($ch, $idx + 1)
+        }
+    }
+    if ($best -gt 0) {
+        return $t.Substring(0, $best + 1) + $nl + $t.Substring($best + 1)
+    }
+    return $t
+}
+
+function Fetch-DailyQuote {
+    param([switch]$Show)
+    if ($script:FetchBusy) { return }
+    $script:FetchBusy = $true
+    $script:FetchedShow = [bool]$Show
+    Trace-Log 'quote-fetch-start'
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $wc = New-Object System.Net.WebClient
+        $wc.Headers.Add('User-Agent', 'SloganWidget/1.4 (PowerShell)')
+        $wc.Encoding = [Text.Encoding]::UTF8
+        $wc.add_DownloadStringCompleted({
+            param($s, $e)
+            $script:FetchBusy = $false
+            $wantShow = $script:FetchedShow
+            try {
+                if ($e.Error -or -not $e.Result) { Trace-Log 'quote-fetch-fail'; return }
+                $obj = ($e.Result | ConvertFrom-Json)
+                $txt = [string]$obj.hitokoto
+                if (-not $txt) { Trace-Log 'quote-fetch-empty'; return }
+                $script:S.TodayQuote = $txt.Trim()
+                $script:S.QuoteDay = (Get-Date -Format 'yyyy-MM-dd')
+                $script:LastFetchDay = $script:S.QuoteDay
+                Save-Config
+                Trace-Log ('quote-fetch-ok ' + $script:S.TodayQuote)
+                $invoker = [System.Windows.Forms.MethodInvoker]{
+                    if (($wantShow -or $script:S.QuoteMode -eq 'recommend') -and -not $script:S.Resting) {
+                        Start-Fade -Text (Convert-QuoteLines $script:S.TodayQuote) -Kind 'work'
+                    }
+                }
+                if ($script:S.Form) { [void]$script:S.Form.BeginInvoke($invoker) }
+            } catch { Trace-Log ('quote-fetch-parse ' + $_.Exception.Message) }
+        })
+        $wc.DownloadStringAsync((New-Object Uri('https://v1.hitokoto.cn/?c=d&c=i&encode=json&min_length=8&max_length=26')))
+    } catch {
+        $script:FetchBusy = $false
+        Trace-Log ('quote-fetch ' + $_.Exception.Message)
+    }
+}
+
 function Get-RandomQuote {
     param([string]$Kind, [string]$Avoid = '')
+    if ($Kind -ne 'rest' -and $script:S.QuoteMode -eq 'recommend' -and $script:S.TodayQuote) {
+        return (Convert-QuoteLines $script:S.TodayQuote)
+    }
     $S = $script:S
     if ($Kind -eq 'rest')      { $arr = $S.QuotesRest }
     elseif ($Kind -eq 'work')  { $arr = $S.QuotesWork }
@@ -412,7 +478,7 @@ $script:S = @{
     RestLeft = 0; RestTotal = 270; Rounds = 0
     SizeAuto = $true; FontPx = 19.0
     FontCache = @{}
-    QuoteMode = 'default'; TodayQuote = ''
+    QuoteMode = 'default'; TodayQuote = ''; QuoteDay = ''
     Accents = @{
         study = [System.Drawing.Color]::FromArgb(255, 122, 162, 247)
         work  = [System.Drawing.Color]::FromArgb(255, 187, 154, 247)
@@ -535,6 +601,7 @@ if ($cfg) {
     if ($cfg.PSObject.Properties['h'])         { $script:S.LH        = [double]$cfg.h }
     if ($cfg.PSObject.Properties['quoteMode']) { $script:S.QuoteMode = [string]$cfg.quoteMode }
     if ($cfg.PSObject.Properties['todayQuote']) { $script:S.TodayQuote = [string]$cfg.todayQuote }
+    if ($cfg.PSObject.Properties['todayQuoteDay']) { $script:S.QuoteDay = [string]$cfg.todayQuoteDay }
     Apply-Size -W $script:S.LW -H $script:S.LH
     if ($cfg.day -ne (Get-Date -Format 'yyyy-MM-dd')) { $script:S.Rounds = 0 }
     $form.Left = [int]$cfg.x
@@ -812,6 +879,16 @@ $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $miTasks = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '今日任务…'
 $miNext  = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '下一句'
 $miPause = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '暂停轮播'
+$miQuote = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '今日口号'
+$miQuoteDefault = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '使用默认口号'
+$miQuoteRec = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '使用今日推荐'
+$miQuoteNew = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '换一条推荐'
+[void]$miQuote.DropDownItems.Add($miQuoteDefault)
+[void]$miQuote.DropDownItems.Add($miQuoteRec)
+[void]$miQuote.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+[void]$miQuote.DropDownItems.Add($miQuoteNew)
+$miQuoteDefault.Checked = ($script:S.QuoteMode -ne 'recommend')
+$miQuoteRec.Checked = ($script:S.QuoteMode -eq 'recommend')
 $miSize  = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '大小'
 $miSizeAuto = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '自适应文字'
 $miSizeS = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList '小　240×88'
@@ -840,6 +917,7 @@ $sep = New-Object System.Windows.Forms.ToolStripSeparator
 [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 [void]$menu.Items.Add($miNext)
 [void]$menu.Items.Add($miPause)
+[void]$menu.Items.Add($miQuote)
 [void]$menu.Items.Add($miSize)
 [void]$menu.Items.Add($sep)
 [void]$menu.Items.Add($miTop)
@@ -915,6 +993,30 @@ $miSizeG.Add_Click({
     $miSizeAuto.Checked = $true
     Update-AutoSize
     Save-Config
+})
+
+$miQuoteDefault.Add_Click({
+    $script:S.QuoteMode = 'default'
+    $miQuoteDefault.Checked = $true
+    $miQuoteRec.Checked = $false
+    Save-Config
+    if (-not $script:S.Resting) { Show-NextQuote }
+})
+
+$miQuoteRec.Add_Click({
+    $script:S.QuoteMode = 'recommend'
+    $miQuoteDefault.Checked = $false
+    $miQuoteRec.Checked = $true
+    Save-Config
+    if (-not $script:S.TodayQuote -or $script:S.QuoteDay -ne (Get-Date -Format 'yyyy-MM-dd')) {
+        Fetch-DailyQuote -Show
+    } elseif (-not $script:S.Resting) {
+        Start-Fade -Text (Convert-QuoteLines $script:S.TodayQuote) -Kind 'work'
+    }
+})
+
+$miQuoteNew.Add_Click({
+    Fetch-DailyQuote -Show
 })
 
 $miTop.Add_Click({
@@ -1000,6 +1102,12 @@ $script:ClockTimer.Add_Tick({
         if ($S.FocusSeconds -ge $S.FocusTarget) { Start-Rest }
     }
     $S.Panel.Invalidate()
+    if ($script:S.QuoteMode -eq 'recommend' -and
+        $script:S.QuoteDay -ne (Get-Date -Format 'yyyy-MM-dd') -and
+        $script:LastFetchDay -ne (Get-Date -Format 'yyyy-MM-dd')) {
+        $script:LastFetchDay = (Get-Date -Format 'yyyy-MM-dd')
+        Fetch-DailyQuote -Show
+    }
 })
 
 $script:RotTimer = New-Object System.Windows.Forms.Timer
@@ -1029,6 +1137,10 @@ $script:FadeTimer.Add_Tick({
 })
 
 # ---------------- 收尾 ----------------
+if ($script:S.QuoteMode -eq 'recommend' -and (-not $script:S.TodayQuote -or $script:S.QuoteDay -ne (Get-Date -Format 'yyyy-MM-dd'))) {
+    Fetch-DailyQuote
+}
+
 $form.Add_FormClosing({
     Save-Config
     try { $script:ClockTimer.Stop() } catch { }
